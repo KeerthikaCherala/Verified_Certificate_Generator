@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, File, UploadFile
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,10 +7,13 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 import uuid
-from datetime import datetime
-
+from datetime import datetime, date
+import qrcode
+from io import BytesIO
+import base64
+import json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -25,32 +29,128 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+# Certificate Models
+class CertificateCreate(BaseModel):
+    intern_name: str
+    role: str
+    duration: str
+    mode: str  # online/offline
+    start_date: str
+    end_date: str
 
-# Define Models
-class StatusCheck(BaseModel):
+class Certificate(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    verification_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    intern_name: str
+    role: str
+    duration: str
+    mode: str
+    start_date: str
+    end_date: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    issued_by: str = "A Siddarth Reddy"
+    issued_by_title: str = "Chief Technology Officer"
+    company: str = "DNOT Technologies"
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class CertificateVerification(BaseModel):
+    verification_id: str
+    is_valid: bool
+    certificate_data: Optional[Certificate] = None
+    message: str
 
-# Add your routes to the router instead of directly to app
+# Generate QR Code
+def generate_qr_code(verification_id: str, base_url: str = "https://68c73219-583a-46eb-b709-21483e91360f.preview.emergentagent.com") -> str:
+    """Generate QR code for certificate verification"""
+    verification_url = f"{base_url}/verify/{verification_id}"
+    
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(verification_url)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Convert to base64
+    buffer = BytesIO()
+    img.save(buffer, format='PNG')
+    img_str = base64.b64encode(buffer.getvalue()).decode()
+    
+    return f"data:image/png;base64,{img_str}"
+
+# API Endpoints
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "DNOT Technologies Certificate System"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
+@api_router.post("/certificates", response_model=Certificate)
+async def create_certificate(certificate_data: CertificateCreate):
+    """Create a new certificate"""
+    try:
+        # Create certificate object
+        cert_dict = certificate_data.dict()
+        certificate = Certificate(**cert_dict)
+        
+        # Store in database
+        await db.certificates.insert_one(certificate.dict())
+        
+        return certificate
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating certificate: {str(e)}")
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
+@api_router.get("/certificates/{certificate_id}", response_model=Certificate)
+async def get_certificate(certificate_id: str):
+    """Get certificate by ID"""
+    certificate = await db.certificates.find_one({"id": certificate_id})
+    if not certificate:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    return Certificate(**certificate)
+
+@api_router.get("/certificates", response_model=List[Certificate])
+async def get_all_certificates():
+    """Get all certificates"""
+    certificates = await db.certificates.find().to_list(1000)
+    return [Certificate(**cert) for cert in certificates]
+
+@api_router.get("/verify/{verification_id}")
+async def verify_certificate(verification_id: str):
+    """Verify certificate by verification ID"""
+    try:
+        certificate = await db.certificates.find_one({"verification_id": verification_id})
+        
+        if certificate:
+            return CertificateVerification(
+                verification_id=verification_id,
+                is_valid=True,
+                certificate_data=Certificate(**certificate),
+                message="Certificate is valid and verified"
+            )
+        else:
+            return CertificateVerification(
+                verification_id=verification_id,
+                is_valid=False,
+                certificate_data=None,
+                message="Certificate not found or invalid"
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error verifying certificate: {str(e)}")
+
+@api_router.post("/generate-qr/{verification_id}")
+async def generate_certificate_qr(verification_id: str):
+    """Generate QR code for certificate verification"""
+    try:
+        # Check if certificate exists
+        certificate = await db.certificates.find_one({"verification_id": verification_id})
+        if not certificate:
+            raise HTTPException(status_code=404, detail="Certificate not found")
+        
+        qr_code = generate_qr_code(verification_id)
+        return {"qr_code": qr_code, "verification_url": f"https://68c73219-583a-46eb-b709-21483e91360f.preview.emergentagent.com/verify/{verification_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating QR code: {str(e)}")
 
 # Include the router in the main app
 app.include_router(api_router)
