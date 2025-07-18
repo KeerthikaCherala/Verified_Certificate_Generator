@@ -305,7 +305,7 @@ const CertificateVerification = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const verifycertificate = async () => {
+    const verifyCertificate = async () => {
       try {
         const response = await axios.get(`${API}/verify/${verificationId}`);
         setVerificationResult(response.data);
