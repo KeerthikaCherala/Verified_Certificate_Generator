@@ -14,17 +14,41 @@ import qrcode
 from io import BytesIO
 import base64
 import json
+from contextlib import asynccontextmanager
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+try:
+    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+    db_name = os.environ.get('DB_NAME', 'certificate_db')
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+    logger.info(f"Connected to MongoDB at {mongo_url}")
+except Exception as e:
+    logger.error(f"Failed to connect to MongoDB: {e}")
+    logger.warning("Server will start but database operations will fail")
+    client = None
+    db = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    yield
+    # Shutdown
+    if client:
+        client.close()
 
 # Create the main app without a prefix
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -90,12 +114,15 @@ async def root():
 async def create_certificate(certificate_data: CertificateCreate):
     """Create a new certificate"""
     try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
         # Create certificate object
-        cert_dict = certificate_data.dict()
+        cert_dict = certificate_data.model_dump()
         certificate = Certificate(**cert_dict)
         
         # Store in database
-        await db.certificates.insert_one(certificate.dict())
+        await db.certificates.insert_one(certificate.model_dump())
         
         return certificate
     except Exception as e:
@@ -104,6 +131,9 @@ async def create_certificate(certificate_data: CertificateCreate):
 @api_router.get("/certificates/{certificate_id}", response_model=Certificate)
 async def get_certificate(certificate_id: str):
     """Get certificate by ID"""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
     certificate = await db.certificates.find_one({"id": certificate_id})
     if not certificate:
         raise HTTPException(status_code=404, detail="Certificate not found")
@@ -112,6 +142,9 @@ async def get_certificate(certificate_id: str):
 @api_router.get("/certificates", response_model=List[Certificate])
 async def get_all_certificates():
     """Get all certificates"""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
     certificates = await db.certificates.find().to_list(1000)
     return [Certificate(**cert) for cert in certificates]
 
@@ -119,6 +152,9 @@ async def get_all_certificates():
 async def verify_certificate(verification_id: str):
     """Verify certificate by verification ID"""
     try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
         certificate = await db.certificates.find_one({"verification_id": verification_id})
         
         if certificate:
@@ -142,6 +178,9 @@ async def verify_certificate(verification_id: str):
 async def generate_certificate_qr(verification_id: str):
     """Generate QR code for certificate verification"""
     try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
         # Check if certificate exists
         certificate = await db.certificates.find_one({"verification_id": verification_id})
         if not certificate:
@@ -163,13 +202,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

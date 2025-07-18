@@ -87,61 +87,96 @@ const CertificateCreator = () => {
     ctx.fillStyle = '#10b981';
     ctx.fillRect(canvas.width - 100, 0, 100, 100);
     
-    // Company logo placeholder (top left)
-    ctx.fillStyle = '#1f2937';
-    ctx.font = 'bold 24px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText('DNOT', 50, 80);
-    ctx.font = '14px Arial';
-    ctx.fillText('TECHNOLOGIES', 50, 100);
+    // Load images and draw certificate
+    const logoImg = new Image();
+    const signatureImg = new Image();
+    let imagesLoaded = 0;
+    const totalImages = 2 + (qrCodeData ? 1 : 0);
+    let qrImg = null;
     
-    // Certificate title
-    ctx.fillStyle = '#1f2937';
-    ctx.font = 'bold 36px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Certificate of Completion', canvas.width / 2, 160);
-    
-    // "This certificate awarded to:" text
-    ctx.font = '16px Arial';
-    ctx.fillText('This certificate awarded to:', canvas.width / 2, 200);
-    
-    // Intern name
-    ctx.font = 'bold 32px Arial';
-    ctx.fillText(certData.intern_name, canvas.width / 2, 250);
-    
-    // Line under name
-    ctx.strokeStyle = '#d1d5db';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(200, 260);
-    ctx.lineTo(600, 260);
-    ctx.stroke();
-    
-    // Certificate text
-    ctx.font = '16px Arial';
-    ctx.fillStyle = '#374151';
-    const certText = `successfully completed a ${certData.duration} ${certData.mode} Internship in ${certData.role}`;
-    ctx.fillText(certText, canvas.width / 2, 310);
-    
-    const dateText = `from ${certData.start_date} to ${certData.end_date}, with satisfactory performance.`;
-    ctx.fillText(dateText, canvas.width / 2, 340);
-    
-    // Signature area
-    ctx.fillStyle = '#1f2937';
-    ctx.font = 'bold 18px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText('A Siddarth Reddy', 100, 480);
-    ctx.font = '14px Arial';
-    ctx.fillText('Chief Technology Officer', 100, 500);
-    
-    // QR Code
-    if (qrCodeData) {
-      const qrImg = new Image();
-      qrImg.onload = () => {
+    const drawCertificateContent = () => {
+      // Draw logo
+      const logoWidth = 120;
+      const logoHeight = (logoWidth * logoImg.height) / logoImg.width;
+      ctx.drawImage(logoImg, 50, 30, logoWidth, logoHeight);
+      
+      // Certificate title
+      ctx.fillStyle = '#1f2937';
+      ctx.font = 'bold 36px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Certificate of Completion', canvas.width / 2, 160);
+      
+      // "This certificate awarded to:" text
+      ctx.font = '16px Arial';
+      ctx.fillText('This certificate awarded to:', canvas.width / 2, 200);
+      
+      // Intern name
+      ctx.font = 'bold 32px Arial';
+      ctx.fillText(certData.intern_name, canvas.width / 2, 250);
+      
+      // Line under name
+      ctx.strokeStyle = '#d1d5db';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(200, 260);
+      ctx.lineTo(600, 260);
+      ctx.stroke();
+      
+      // Certificate text
+      ctx.font = '16px Arial';
+      ctx.fillStyle = '#374151';
+      const certText = `successfully completed a ${certData.duration} ${certData.mode} Internship in ${certData.role}`;
+      ctx.fillText(certText, canvas.width / 2, 310);
+      
+      const dateText = `from ${certData.start_date} to ${certData.end_date}, with satisfactory performance.`;
+      ctx.fillText(dateText, canvas.width / 2, 340);
+      
+      // Draw signature
+      const signatureWidth = 120;
+      const signatureHeight = (signatureWidth * signatureImg.height) / signatureImg.width;
+      ctx.drawImage(signatureImg, 100, 420, signatureWidth, signatureHeight);
+      
+      // Add title below signature
+      ctx.fillStyle = '#1f2937';
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText('Chief Technology Officer', 100, 480);
+      
+      // Draw QR code if available
+      if (qrImg) {
         ctx.drawImage(qrImg, canvas.width - 150, 420, 80, 80);
         ctx.font = '12px Arial';
         ctx.textAlign = 'center';
         ctx.fillText('Verification ID', canvas.width - 110, 515);
+      }
+    };
+    
+    // Load logo
+    logoImg.onload = () => {
+      imagesLoaded++;
+      if (imagesLoaded === totalImages) {
+        drawCertificateContent();
+      }
+    };
+    logoImg.src = '/logo.jpeg';
+    
+    // Load signature
+    signatureImg.onload = () => {
+      imagesLoaded++;
+      if (imagesLoaded === totalImages) {
+        drawCertificateContent();
+      }
+    };
+    signatureImg.src = '/signature.jpeg';
+    
+    // QR Code
+    if (qrCodeData) {
+      qrImg = new Image();
+      qrImg.onload = () => {
+        imagesLoaded++;
+        if (imagesLoaded === totalImages) {
+          drawCertificateContent();
+        }
       };
       qrImg.src = qrCodeData;
     }
