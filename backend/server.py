@@ -15,6 +15,7 @@ from io import BytesIO
 import base64
 import json
 from contextlib import asynccontextmanager
+import hashlib
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -26,22 +27,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# MongoDB connection
-try:
-    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-    db_name = os.environ.get('DB_NAME', 'certificate_db')
-    client = AsyncIOMotorClient(mongo_url)
-    db = client[db_name]
-    logger.info(f"Connected to MongoDB at {mongo_url}")
-except Exception as e:
-    logger.error(f"Failed to connect to MongoDB: {e}")
-    logger.warning("Server will start but database operations will fail")
-    client = None
-    db = None
+# MongoDB connection with fallback
+client = None
+db = None
+
+async def connect_to_mongodb():
+    global client, db
+    try:
+        mongo_url = os.environ.get('MONGO_URL')
+        db_name = os.environ.get('DB_NAME', 'certificate_db')
+        
+        if not mongo_url:
+            raise Exception("MONGO_URL environment variable not set")
+        
+        logger.info("Connecting to MongoDB Atlas...")
+        # Add SSL configuration for Cloud Run compatibility
+        client = AsyncIOMotorClient(
+            mongo_url, 
+            serverSelectionTimeoutMS=30000,
+            tlsAllowInvalidCertificates=True
+        )
+        await client.admin.command('ping')
+        db = client[db_name]
+        logger.info(f"✅ Connected to MongoDB Atlas: {db_name}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"MongoDB Atlas connection failed: {e}")
+        logger.error("Server will start but database operations will fail")
+        if client:
+            client.close()
+        client = None
+        db = None
+        return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    await connect_to_mongodb()
     yield
     # Shutdown
     if client:
@@ -82,9 +105,45 @@ class CertificateVerification(BaseModel):
     certificate_data: Optional[Certificate] = None
     message: str
 
+# User Models
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    username: str
+    password_hash: str
+    full_name: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    full_name: str
+    created_at: datetime
+    is_active: bool
+
+# Helper functions
+def hash_password(password: str) -> str:
+    """Hash password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify password against hash"""
+    return hash_password(password) == password_hash
+
 # Generate QR Code
-def generate_qr_code(verification_id: str, base_url: str = "https://68c73219-583a-46eb-b709-21483e91360f.preview.emergentagent.com") -> str:
+def generate_qr_code(verification_id: str, base_url: str = None) -> str:
     """Generate QR code for certificate verification"""
+    if base_url is None:
+        base_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
     verification_url = f"{base_url}/verify/{verification_id}"
     
     qr = qrcode.QRCode(
@@ -109,6 +168,103 @@ def generate_qr_code(verification_id: str, base_url: str = "https://68c73219-583
 @api_router.get("/")
 async def root():
     return {"message": "DNOT Technologies Certificate System"}
+
+@api_router.get("/ip")
+async def get_ip():
+    """Get the outbound IP address of this Cloud Run service"""
+    import requests
+    try:
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+# Authentication Endpoints
+@api_router.post("/register", response_model=UserResponse)
+async def register_user(user_data: UserCreate):
+    """Register a new user (admin only endpoint)"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
+        # Check if username already exists
+        existing_user = await db.users.find_one({"username": user_data.username})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Create user
+        user_dict = user_data.model_dump()
+        user_dict["password_hash"] = hash_password(user_dict.pop("password"))
+        user = User(**user_dict)
+        
+        # Store in database
+        await db.users.insert_one(user.model_dump())
+        
+        return UserResponse(**user.model_dump())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating user: {str(e)}")
+
+@api_router.post("/login")
+async def login_user(login_data: UserLogin):
+    """Login user"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
+        # Find user
+        user_doc = await db.users.find_one({"username": login_data.username})
+        if not user_doc:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        user = User(**user_doc)
+        
+        # Verify password
+        if not verify_password(login_data.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        # Check if user is active
+        if not user.is_active:
+            raise HTTPException(status_code=401, detail="User account is disabled")
+        
+        return {
+            "message": "Login successful",
+            "user": UserResponse(**user.model_dump()).model_dump()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during login: {str(e)}")
+
+@api_router.post("/create-admin")
+async def create_admin_user():
+    """Create default admin user if no users exist"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
+        # Check if any users exist
+        existing_users = await db.users.count_documents({})
+        if existing_users > 0:
+            raise HTTPException(status_code=400, detail="Admin user already exists")
+        
+        # Create default admin user
+        admin_data = {
+            "username": "admin",
+            "password_hash": hash_password("admin123"),
+            "full_name": "System Administrator"
+        }
+        admin = User(**admin_data)
+        
+        # Store in database
+        await db.users.insert_one(admin.model_dump())
+        
+        return {"message": "Admin user created successfully", "username": "admin", "password": "admin123"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating admin user: {str(e)}")
 
 @api_router.post("/certificates", response_model=Certificate)
 async def create_certificate(certificate_data: CertificateCreate):
@@ -186,8 +342,9 @@ async def generate_certificate_qr(verification_id: str):
         if not certificate:
             raise HTTPException(status_code=404, detail="Certificate not found")
         
+        frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
         qr_code = generate_qr_code(verification_id)
-        return {"qr_code": qr_code, "verification_url": f"https://68c73219-583a-46eb-b709-21483e91360f.preview.emergentagent.com/verify/{verification_id}"}
+        return {"qr_code": qr_code, "verification_url": f"{frontend_url}/verify/{verification_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating QR code: {str(e)}")
 
